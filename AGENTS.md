@@ -615,10 +615,10 @@ cl
 **JDK 17 安装指导**：
 
 ```
-推荐下载地址（任选一个）：
-1. Eclipse Adoptium（免费）：https://adoptium.net/
-2. Oracle JDK：https://www.oracle.com/java/technologies/downloads/
-3. 华为镜像（国内快速）：https://repo.huaweicloud.com/java/jdk/
+推荐下载地址（优先使用国内镜像）：
+1. 华为镜像（推荐，国内最快）：https://repo.huaweicloud.com/java/jdk/
+2. Eclipse Adoptium（免费）：https://adoptium.net/
+3. Oracle JDK：https://www.oracle.com/java/technologies/downloads/
 
 安装步骤：
 1. 下载 JDK 17 Windows x64 安装包
@@ -632,10 +632,10 @@ cl
 **MinGW-w64 安装指导（C/C++）**：
 
 ```
-推荐下载地址：
-1. 官网：https://www.mingw-w64.org/
+推荐下载地址（优先使用国内镜像）：
+1. 华为镜像（推荐）：https://repo.huaweicloud.com/mingw/
 2. MSYS2（推荐）：https://www.msys2.org/
-3. 华为镜像：https://repo.huaweicloud.com/mingw/
+3. 官网：https://www.mingw-w64.org/
 
 MSYS2 安装步骤：
 1. 下载并安装 MSYS2
@@ -643,6 +643,29 @@ MSYS2 安装步骤：
 3. 执行：pacman -S mingw-w64-ucrt-x86_64-gcc
 4. 将 C:\msys64\ucrt64\bin 添加到系统 PATH
 5. 重启终端，验证：g++ --version
+```
+
+**pip 镜像源配置（重要）**：
+
+```
+安装 Python 依赖时，务必使用国内镜像源，否则可能非常慢甚至失败。
+
+临时使用镜像源：
+pip install python-docx Pillow -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+永久配置镜像源（推荐）：
+pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
+常用国内镜像源：
+1. 清华源（推荐）：https://pypi.tuna.tsinghua.edu.cn/simple
+2. 阿里源：https://mirrors.aliyun.com/pypi/simple/
+3. 腾讯源：https://mirrors.cloud.tencent.com/pypi/simple
+4. 华为源：https://repo.huaweicloud.com/repository/pypi/simple
+
+如果下载速度慢，Agent 应该：
+1. 自动使用 -i 参数指定镜像源
+2. 提示用户可以永久配置镜像源
+3. 如果一个镜像源慢，尝试换另一个
 ```
 
 ### 12.6 Agent 检测后的标准回复模板
@@ -674,6 +697,32 @@ MSYS2 安装步骤：
 请问：
 1. Python 您想使用哪个版本？（建议选择 3.10 或更高版本）
 2. 是否需要我帮您配置 JDK 17 环境？
+```
+
+**Agent 安装依赖时的标准做法**：
+
+当需要安装 Python 依赖时，Agent 应该：
+
+1. **优先使用国内镜像源**，避免下载慢或失败
+2. 如果一个镜像源失败，自动尝试其他镜像源
+
+```bash
+# 推荐使用清华源
+pip install python-docx Pillow -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 如果清华源失败，尝试阿里源
+pip install python-docx Pillow -i https://mirrors.aliyun.com/pypi/simple/
+
+# 如果还是失败，尝试华为源
+pip install python-docx Pillow -i https://repo.huaweicloud.com/repository/pypi/simple
+```
+
+**Agent 应该告诉用户**：
+
+```
+正在安装 Python 依赖（使用国内镜像源加速）...
+✅ python-docx 安装成功
+✅ Pillow 安装成功
 ```
 
 **命令行参数说明**：

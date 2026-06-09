@@ -41,5 +41,8 @@ output/
 # 实验指导书和报告模板（包含个人信息）
 *.docx
 
+# 但保留 templates 文件夹中的模板文件
+!templates/*.docx
+
 # 敏感文件
 *.pdf

@@ -6,17 +6,17 @@
     python generate_report.py                  # 生成所有实验报告
     python generate_report.py --exp 1          # 仅生成实验一
     python generate_report.py --merge          # 合并所有实验到一份报告
+    python generate_report.py --dry-run        # 预览模式，不实际生成
 
 依赖:
-    pip install python-docx
+    pip install python-docx Pillow
 """
 
 import os
 import re
-import copy
-import glob
 import argparse
 import shutil
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -31,13 +31,32 @@ except ImportError:
     exit(1)
 
 
-def check_environment():
+# ============================================================
+# 日志配置
+# ============================================================
+
+logger = logging.getLogger("LabFlow")
+
+
+def setup_logging(verbose: bool = False):
+    """配置日志系统。verbose 模式输出 DEBUG 级别，否则输出 INFO 级别。"""
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG if verbose else logging.INFO)
+
+
+# ============================================================
+# 环境检查
+# ============================================================
+
+def check_environment() -> bool:
     """
     检查运行环境，确保必要的依赖已安装。
     返回 True 表示环境正常，False 表示有问题。
     """
     print("🔍 检查运行环境...")
-    
+
     # 检查 Python 版本
     import sys
     version = sys.version_info
@@ -47,7 +66,7 @@ def check_environment():
         print("      请访问: https://www.python.org/downloads/")
         return False
     print(f"   ✅ Python 版本: {version.major}.{version.minor}.{version.micro}")
-    
+
     # 检查 Pillow 依赖
     try:
         from PIL import Image
@@ -56,7 +75,7 @@ def check_environment():
         print("   ❌ 缺少 Pillow 依赖")
         print("      请运行: pip install Pillow")
         return False
-    
+
     # 检查 python-docx 依赖（已经在导入时检查过，这里再确认一下）
     try:
         from docx import Document
@@ -65,7 +84,7 @@ def check_environment():
         print("   ❌ 缺少 python-docx 依赖")
         print("      请运行: pip install python-docx")
         return False
-    
+
     print("   ✅ 环境检查通过")
     return True
 
@@ -105,7 +124,7 @@ def find_docx_by_keywords(keywords: list, search_dirs: list = None) -> Path:
     读取每个 .docx 文件的前 20 个段落，检查是否包含指定关键词。
     """
     from docx import Document
-    
+
     if search_dirs is None:
         search_dirs = [BASE_DIR]
         for d in BASE_DIR.iterdir():
@@ -123,7 +142,8 @@ def find_docx_by_keywords(keywords: list, search_dirs: list = None) -> Path:
                     text = para.text.strip()
                     if any(kw in text for kw in keywords):
                         return docx_file
-            except Exception:
+            except Exception as e:
+                logger.debug(f"  跳过无法读取的文件 {docx_file.name}: {e}")
                 continue
     return None
 
@@ -134,19 +154,19 @@ def find_instruction_file() -> Path:
     result = find_file("实验指导书.docx")
     if result:
         return result
-    
+
     # 2. 尝试其他常见命名
     for name in ["指导书.docx", "算法实验指导书.docx", "实验指导.docx"]:
         result = find_file(name)
         if result:
             return result
-    
+
     # 3. 通过内容关键词查找
     keywords = ["实验指导书", "实验目的", "实验内容", "实验原理"]
     result = find_docx_by_keywords(keywords)
     if result:
         return result
-    
+
     return None
 
 
@@ -156,19 +176,19 @@ def find_template_file() -> Path:
     result = find_file("实验报告.docx")
     if result:
         return result
-    
+
     # 2. 尝试其他常见命名
     for name in ["报告模板.docx", "算法实验报告.docx", "模板.docx"]:
         result = find_file(name)
         if result:
             return result
-    
+
     # 3. 通过内容关键词查找
     keywords = ["教学上机实验报告", "实验题目", "实验过程", "实验成绩"]
     result = find_docx_by_keywords(keywords)
     if result:
         return result
-    
+
     return None
 
 
@@ -269,7 +289,7 @@ def detect_report_tables(doc) -> tuple:
     """
     自动检测模板中的实验报告表格。
     返回: (report_tables_list, is_single_table)
-    
+
     检测逻辑：
     1. 扫描所有表格，找包含"实验报告"标题的表格
     2. 如果找到多个小表格 → 多表格格式
@@ -277,7 +297,7 @@ def detect_report_tables(doc) -> tuple:
     """
     small_tables = []
     large_table = None
-    
+
     for table in doc.tables:
         # 检查表格前几行是否包含实验报告标题
         has_title = False
@@ -288,18 +308,18 @@ def detect_report_tables(doc) -> tuple:
                 break
         if not has_title:
             continue
-        
+
         # 检查是否包含实验相关字段
         row_map = scan_table_rows(table)
         if "topic" not in row_map and "purpose" not in row_map:
             continue
-        
+
         # 判断表格大小
         if len(table.rows) <= 12:
             small_tables.append(table)
         else:
             large_table = table
-    
+
     if large_table and not small_tables:
         return ([large_table], True)
     elif small_tables:
@@ -312,9 +332,10 @@ def fill_single_experiment(table_or_range, exp_data: dict, code: str,
                            images: list, exp_date: str = "",
                            row_map: dict = None, row_offset: int = 0):
     """
-    通用的实验填充函数。
+    通用的实验填充函数（唯一入口）。
     通过 row_map 自动定位每个字段所在行，而不是硬编码行号。
-    
+    单独生成和合并模式都调用此函数。
+
     参数:
         table_or_range: 表格对象
         exp_data: 实验数据
@@ -325,11 +346,11 @@ def fill_single_experiment(table_or_range, exp_data: dict, code: str,
         row_offset: 行偏移（用于单表格多实验场景）
     """
     table = table_or_range
-    
+
     # 如果没有提供 row_map，自动扫描
     if row_map is None:
         row_map = scan_table_rows(table)
-    
+
     # --- 日期 ---
     if exp_date and "date" in row_map:
         row_idx = row_map["date"] + row_offset
@@ -341,7 +362,7 @@ def fill_single_experiment(table_or_range, exp_data: dict, code: str,
                 run = p.add_run(f"上机时间   {exp_date} ")
                 set_run_font(run, size=10.5)
                 break
-    
+
     # --- 实验题目 ---
     if "topic" in row_map:
         row_idx = row_map["topic"] + row_offset
@@ -363,7 +384,7 @@ def fill_single_experiment(table_or_range, exp_data: dict, code: str,
                 "size": 12, "bold": False,
                 "line_spacing": 1.5, "first_indent_chars": 0,
             })
-    
+
     # --- 实验目的和要求 ---
     if "purpose" in row_map:
         row_idx = row_map["purpose"] + row_offset
@@ -380,7 +401,7 @@ def fill_single_experiment(table_or_range, exp_data: dict, code: str,
             clear_cell_keep_first_label(cell)
             for i, item in enumerate(exp_data.get("purpose", []) + exp_data.get("content", []), 1):
                 add_paragraph_to_cell(cell, f"{i}．{item}", Fmt.CONTENT)
-    
+
     # --- 实验过程 ---
     if "process" in row_map:
         row_idx = row_map["process"] + row_offset
@@ -390,7 +411,7 @@ def fill_single_experiment(table_or_range, exp_data: dict, code: str,
             add_paragraph_to_cell(cell, code, Fmt.CODE)
         else:
             add_paragraph_to_cell(cell, "（请将源代码放入 src/ 目录）", Fmt.CONTENT)
-    
+
     # --- 实验结果 ---
     if "result" in row_map:
         row_idx = row_map["result"] + row_offset
@@ -398,10 +419,14 @@ def fill_single_experiment(table_or_range, exp_data: dict, code: str,
         clear_cell_keep_first_label(cell)
         if images:
             for img_path in images:
-                add_image_to_cell(cell, img_path)
+                try:
+                    add_image_to_cell(cell, img_path)
+                except Exception as e:
+                    logger.warning(f"  ⚠️  插入图片失败 {img_path.name}: {e}")
+                    add_paragraph_to_cell(cell, f"（图片插入失败: {img_path.name}）", Fmt.CONTENT)
         else:
             add_paragraph_to_cell(cell, "（请将运行结果截图放入 output/ 目录）", Fmt.CONTENT)
-    
+
     # --- 实验分析 ---
     if "analysis" in row_map:
         row_idx = row_map["analysis"] + row_offset
@@ -549,6 +574,52 @@ def detect_exp_dirs(base_dir: Path, exp_num: int):
 
 
 # ============================================================
+# 日期格式化
+# ============================================================
+
+def normalize_date(date_str: str) -> str:
+    """
+    将各种日期格式统一为模板所需的格式。
+
+    支持的输入格式：
+        "2026年3月30日"、"2026-03-30"、"2026/03/30"、
+        "2026.03.30"、"20260330"、"3月30日" 等
+
+    输出格式：
+        "2026  年 3  月 30  日"（匹配模板中的排版）
+    """
+    if not date_str:
+        return ""
+
+    date_str = date_str.strip()
+
+    # 尝试匹配 "2026年3月30日" 或 "2026年03月30日"
+    m = re.match(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", date_str)
+    if m:
+        return f"{m.group(1)}  年 {int(m.group(2))}  月 {int(m.group(3))}  日"
+
+    # 尝试匹配 "2026-03-30" / "2026/03/30" / "2026.03.30"
+    m = re.match(r"(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})", date_str)
+    if m:
+        return f"{m.group(1)}  年 {int(m.group(2))}  月 {int(m.group(3))}  日"
+
+    # 尝试匹配纯数字 "20260330"
+    m = re.match(r"(\d{4})(\d{2})(\d{2})$", date_str)
+    if m:
+        return f"{m.group(1)}  年 {int(m.group(2))}  月 {int(m.group(3))}  日"
+
+    # 尝试匹配 "3月30日"（补充当前年份）
+    m = re.match(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日", date_str)
+    if m:
+        year = datetime.now().year
+        return f"{year}  年 {int(m.group(1))}  月 {int(m.group(2))}  日"
+
+    # 无法识别，原样返回并提示
+    logger.warning(f"  ⚠️  无法解析日期格式 '{date_str}'，将原样使用")
+    return date_str
+
+
+# ============================================================
 # 指导书解析
 # ============================================================
 
@@ -575,7 +646,12 @@ def parse_instruction_book(filepath: Path) -> list:
         print(f"[警告] 实验指导书不存在: {filepath}")
         return []
 
-    doc = Document(str(filepath))
+    try:
+        doc = Document(str(filepath))
+    except Exception as e:
+        print(f"[错误] 无法打开实验指导书: {e}")
+        return []
+
     experiments = []
     current = None
 
@@ -725,10 +801,10 @@ def read_source_code(src_path: Path, base_dir: Path = None) -> str:
 
     # 如果是目录，读取所有代码文件
     code_files = []
-    for ext in ["*.py", "*.java", "*.cpp", "*.c", "*.h", "*.js"]:
+    for ext in ["*.py", "*.java", "*.cpp", "*.c", "*.h", "*.js", "*.go", "*.rs"]:
         code_files.extend(src_path.glob(ext))
     # 也搜索子目录中的代码文件
-    for ext in ["**/*.py", "**/*.java", "**/*.cpp", "**/*.c", "**/*.h", "**/*.js"]:
+    for ext in ["**/*.py", "**/*.java", "**/*.cpp", "**/*.c", "**/*.h", "**/*.js", "**/*.go", "**/*.rs"]:
         for f in src_path.glob(ext):
             if f not in code_files:
                 code_files.append(f)
@@ -771,7 +847,7 @@ def read_output_images(out_path: Path) -> list:
         return []
 
     images = []
-    for ext in ["*.png", "*.jpg", "*.jpeg", "*.bmp"]:
+    for ext in ["*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif", "*.webp"]:
         images.extend(out_path.glob(ext))
     return sorted(images)
 
@@ -792,155 +868,139 @@ def read_output_text(out_path: Path) -> str:
 
 
 # ============================================================
-# 报告生成核心
+# 代码静态分析（用于生成更有意义的实验分析）
 # ============================================================
 
-def fill_report_table(doc, exp_data: dict, code: str, images: list,
-                       output_text: str, exp_date: str = ""):
+def _analyze_code(code: str) -> dict:
     """
-    填充实验报告模板中的 Table 2（实验报告正文表）。
-
-    表格结构（8行 × 1列）:
-        Row 0: 河南理工大学教学上机实验报告（标题，不修改）
-        Row 1: 上机时间
-        Row 2: 实验题目
-        Row 3: 实验目的和要求
-        Row 4: 实验过程
-        Row 5: 实验结果
-        Row 6: 实验分析
-        Row 7: 实验成绩 / 日期
+    对源代码做基础静态分析，返回统计信息。
+    用于让 _generate_analysis() 生成更实际的内容。
     """
-    # 找到报告表格（第2个表格）
-    report_table = None
-    for table in doc.tables:
-        first_cell = table.cell(0, 0).text
-        if "河南理工大学教学上机实验报告" in first_cell and len(table.rows) >= 8:
-            report_table = table
-            break
+    if not code:
+        return {}
 
-    if report_table is None:
-        print("[错误] 未找到实验报告表格")
-        return
+    lines = code.splitlines()
+    total_lines = len(lines)
+    non_empty = len([l for l in lines if l.strip()])
+    comment_lines = len([l for l in lines if l.strip().startswith(("#", "//", "/*", "*", "*/"))])
 
-    # --- Row 1: 上机时间 ---
-    if exp_date:
-        cell = report_table.cell(1, 0)
-        # 保留原有格式，只替换日期部分
-        for p in cell.paragraphs:
-            if "上机时间" in p.text:
-                # 清空 runs 并重新写入
-                for run in p.runs:
-                    run.text = ""
-                run = p.add_run(f"上机时间   {exp_date} ")
-                set_run_font(run, size=10.5)
+    # 统计函数/方法数量
+    func_patterns = [
+        r"^\s*def\s+\w+",       # Python
+        r"^\s*(public|private|protected|static)?\s*\w+\s+\w+\s*\(",  # Java/C/C++
+        r"^\s*function\s+\w+",  # JavaScript
+        r"^\s*fn\s+\w+",        # Rust
+        r"^\s*func\s+\w+",      # Go
+    ]
+    func_count = 0
+    for line in lines:
+        for pat in func_patterns:
+            if re.match(pat, line):
+                func_count += 1
+                break
 
-    # --- Row 2: 实验题目 ---
-    cell = report_table.cell(2, 0)
-    # 检查是否已有用户填写的内容（除标题"实验题目"外是否有其他内容）
-    has_user_content = any("实验题目" not in p.text and p.text.strip() for p in cell.paragraphs)
-    if not has_user_content:
-        # 用户未填写，从指导书填充
-        for p in cell.paragraphs:
-            if "实验题目" not in p.text:
-                p_element = p._element
-                p_element.getparent().remove(p_element)
-        add_paragraph_to_cell(cell, exp_data["name"], {
-            "font_ea": "宋体", "font_latin": "宋体",
-            "size": 12, "bold": False,
-            "line_spacing": 1.5, "first_indent_chars": 0,
-        })
+    # 统计循环
+    loop_count = len(re.findall(r"\b(for|while)\b", code))
 
-    # --- Row 3: 实验目的和要求 ---
-    cell = report_table.cell(3, 0)
-    # 检查是否已有用户填写的内容（除标题外是否有其他内容）
-    has_user_content = any("实验目的" not in p.text and p.text.strip() for p in cell.paragraphs)
-    if not has_user_content:
-        # 用户未填写，从指导书填充
-        clear_cell_keep_first_label(cell)
-        purposes = exp_data.get("purpose", [])
-        contents = exp_data.get("content", [])
+    # 统计递归（函数调用自身是难以精确判断的，这里只粗略检测）
+    has_recursion = bool(re.search(r"\bdef\s+(\w+).*\n.*\b\1\s*\(", code, re.DOTALL))
 
-        # 合并目的和内容
-        all_items = []
-        for i, item in enumerate(purposes, 1):
-            all_items.append(f"{i}．{item}")
-        offset = len(purposes)
-        for i, item in enumerate(contents, offset + 1):
-            all_items.append(f"{i}．{item}")
+    # 统计条件分支
+    branch_count = len(re.findall(r"\b(if|else\s+if|elif|switch|case)\b", code))
 
-        for item in all_items:
-            add_paragraph_to_cell(cell, item, Fmt.CONTENT)
+    return {
+        "total_lines": total_lines,
+        "non_empty_lines": non_empty,
+        "comment_lines": comment_lines,
+        "func_count": func_count,
+        "loop_count": loop_count,
+        "has_recursion": has_recursion,
+        "branch_count": branch_count,
+    }
 
-    # --- Row 4: 实验过程 ---
-    cell = report_table.cell(4, 0)
-    clear_cell_keep_first_label(cell)
 
-    if code:
-        add_paragraph_to_cell(cell, code, Fmt.CODE)
-    else:
-        add_paragraph_to_cell(cell, "（请将源代码放入 src/ 目录）", Fmt.CONTENT)
-
-    # --- Row 5: 实验结果 ---
-    cell = report_table.cell(5, 0)
-    clear_cell_keep_first_label(cell)
-
-    if images:
-        for img_path in images:
-            add_image_to_cell(cell, img_path)
-    else:
-        add_paragraph_to_cell(cell, "（请将运行结果截图放入 output/ 目录）", Fmt.CONTENT)
-
-    # --- Row 6: 实验分析 ---
-    cell = report_table.cell(6, 0)
-    clear_cell_keep_first_label(cell)
-
-    # 生成分析内容（这里是模板文本，后续可接入 AI 生成）
-    analysis_sections = _generate_analysis(exp_data, code)
-    for title, content in analysis_sections:
-        add_paragraph_to_cell(cell, title, Fmt.SECTION)
-        add_paragraph_to_cell(cell, content, Fmt.CONTENT)
-
+# ============================================================
+# 报告生成核心
+# ============================================================
 
 def _generate_analysis(exp_data: dict, code: str) -> list:
     """
     生成实验分析内容。
     返回: [(标题, 内容), ...] 列表
 
-    TODO: 这里可以接入 AI API 来生成更智能的分析。
-    目前使用基于模板的生成方式。
+    结合代码静态分析生成更实际的分析文本。
+    TODO: 可以接入 AI API 来生成更智能的分析。
     """
     exp_name = exp_data.get("name", "")
+    stats = _analyze_code(code)
     analyses = []
 
     # 1. 算法正确性分析
-    analyses.append((
-        "一、算法正确性分析",
-        f"本实验实现了{exp_name}的算法。通过对照实验指导书中的示例数据进行测试，"
-        f"程序输出结果与预期一致，验证了算法的正确性。"
-        f"经多组数据测试，算法均能给出正确结果，说明算法逻辑完整、边界条件处理得当。"
-    ))
+    if stats:
+        analyses.append((
+            "一、算法正确性分析",
+            f"本实验实现了{exp_name}的算法，"
+            f"代码共 {stats['total_lines']} 行（有效代码 {stats['non_empty_lines']} 行），"
+            f"包含 {stats['func_count']} 个函数/方法。"
+            f"通过对照实验指导书中的示例数据进行测试，"
+            f"程序输出结果与预期一致，验证了算法的正确性。"
+            f"经多组数据测试，算法均能给出正确结果，说明算法逻辑完整、边界条件处理得当。"
+        ))
+    else:
+        analyses.append((
+            "一、算法正确性分析",
+            f"本实验实现了{exp_name}的算法。通过对照实验指导书中的示例数据进行测试，"
+            f"程序输出结果与预期一致，验证了算法的正确性。"
+            f"经多组数据测试，算法均能给出正确结果，说明算法逻辑完整、边界条件处理得当。"
+        ))
 
     # 2. 时间复杂度分析
-    analyses.append((
-        "二、时间复杂度分析",
-        f"本实验所采用的算法，在平均情况下的时间复杂度需要结合具体的递归树进行分析。"
-        f"（请根据实际代码补充详细的时间复杂度推导过程）"
-    ))
+    if stats and stats["has_recursion"]:
+        analyses.append((
+            "二、时间复杂度分析",
+            f"本实验采用了递归算法，时间复杂度需要结合递归树和主定理进行分析。"
+            f"代码中包含 {stats['loop_count']} 处循环结构，"
+            f"{'递归调用与循环嵌套使得整体复杂度较高' if stats['loop_count'] > 0 else '递归是主要的计算方式'}。"
+            f"（请根据实际代码补充详细的递归方程和求解过程）"
+        ))
+    elif stats and stats["loop_count"] > 0:
+        analyses.append((
+            "二、时间复杂度分析",
+            f"本实验代码中包含 {stats['loop_count']} 处循环结构。"
+            f"算法的时间复杂度主要取决于循环的嵌套层数和迭代次数。"
+            f"（请根据实际代码补充详细的时间复杂度推导过程）"
+        ))
+    else:
+        analyses.append((
+            "二、时间复杂度分析",
+            f"本实验所采用的算法，在平均情况下的时间复杂度需要结合具体的算法结构进行分析。"
+            f"（请根据实际代码补充详细的时间复杂度推导过程）"
+        ))
 
     # 3. 空间复杂度分析
-    analyses.append((
-        "三、空间复杂度分析",
-        f"算法的空间复杂度主要由递归调用栈和辅助数据结构决定。"
-        f"（请根据实际代码补充详细的空间复杂度分析）"
-    ))
+    if stats and stats["has_recursion"]:
+        analyses.append((
+            "三、空间复杂度分析",
+            f"算法的空间复杂度主要由递归调用栈和辅助数据结构决定。"
+            f"递归深度直接影响栈空间的消耗，辅助变量的数量决定额外空间开销。"
+            f"（请根据实际代码补充详细的空间复杂度分析）"
+        ))
+    else:
+        analyses.append((
+            "三、空间复杂度分析",
+            f"算法的空间复杂度主要由输入数据存储和辅助变量决定。"
+            f"代码共定义了 {stats.get('func_count', 0)} 个函数，"
+            f"局部变量的数量和大小决定了额外空间开销。"
+            f"（请根据实际代码补充详细的空间复杂度分析）"
+        ))
 
     # 4. 实验心得
     analyses.append((
         "四、实验心得",
         f"通过本次实验，我深入理解了{exp_name}相关的算法设计与实现方法。"
-        f"在编码过程中，我体会到了递归/分治策略在解决复杂问题时的简洁性和高效性。"
-        f"同时也认识到，在实际编程中需要注意递归终止条件的设置和边界情况的处理，"
-        f"否则容易导致栈溢出或死循环等问题。"
+        f"在编码过程中，我体会到了算法策略在解决复杂问题时的简洁性和高效性。"
+        f"同时也认识到，在实际编程中需要注意边界条件的处理和异常情况的防范，"
+        f"否则容易导致运行时错误或结果不正确等问题。"
     ))
 
     return analyses
@@ -948,7 +1008,10 @@ def _generate_analysis(exp_data: dict, code: str) -> list:
 
 def generate_single_report(exp_data: dict, template_path: Path, output_path: Path,
                            exp_date: str = ""):
-    """为单个实验生成报告"""
+    """
+    为单个实验生成报告。
+    使用与合并模式相同的动态行检测逻辑，不再硬编码行号。
+    """
     exp_num = exp_data["num"]
 
     # 检测源码和输出目录
@@ -965,18 +1028,35 @@ def generate_single_report(exp_data: dict, template_path: Path, output_path: Pat
     if not images:
         print(f"  [提示] 实验{exp_num} 未找到运行结果截图")
 
-    # 复制模板并填充
+    # 打开模板，使用动态表格检测（与合并模式一致）
     doc = Document(str(template_path))
-    fill_report_table(doc, exp_data, code, images, output_text, exp_date)
+    report_tables, is_single = detect_report_tables(doc)
+
+    if not report_tables:
+        print(f"  [错误] 实验{exp_num}: 未找到实验报告表格")
+        return
+
+    # 填充第一个实验表格（单独模式每个文件只有一个实验）
+    table = report_tables[0]
+    row_map = scan_table_rows(table)
+
+    logger.debug(f"  行类型映射: {row_map}")
+
+    fill_single_experiment(table, exp_data, code, images, exp_date, row_map=row_map)
 
     # 保存
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(str(output_path))
-    print(f"  [完成] {output_path.name}")
+    try:
+        doc.save(str(output_path))
+        print(f"  [完成] {output_path.name}")
+    except PermissionError:
+        print(f"  [错误] 无法保存文件（可能被其他程序占用）: {output_path}")
+    except Exception as e:
+        print(f"  [错误] 保存失败: {e}")
 
 
 def merge_reports(experiments: list, template_path: Path, output_path: Path,
-                  exp_dates: dict = None):
+                  exp_dates: dict = None, dry_run: bool = False):
     """
     将所有实验合并到一份报告中。
     自动检测模板格式（多表格/单表格），按字段名匹配行类型。
@@ -988,7 +1068,7 @@ def merge_reports(experiments: list, template_path: Path, output_path: Path,
 
     # 自动检测报告表格
     report_tables, is_single = detect_report_tables(doc)
-    
+
     if not report_tables:
         print("[错误] 未找到实验报告表格")
         return
@@ -1000,116 +1080,90 @@ def merge_reports(experiments: list, template_path: Path, output_path: Path,
         ROWS_PER_EXP = 8  # 每个实验占8行（标准格式）
         total_rows = len(table.rows)
         num_slots = total_rows // ROWS_PER_EXP
-        
+
         print(f"  检测到单表格格式，共 {total_rows} 行（{num_slots} 个实验位）")
-        print(f"  行类型映射: {row_map}")
-        
+        logger.debug(f"  行类型映射: {row_map}")
+
+        if dry_run:
+            for idx, exp_data in enumerate(experiments):
+                if idx >= num_slots:
+                    print(f"  [跳过] 实验{exp_data['num']}: 没有足够的行")
+                    continue
+                src_path, out_path = detect_exp_dirs(BASE_DIR, exp_data["num"])
+                code = read_source_code(src_path, BASE_DIR)
+                images = read_output_images(out_path)
+                print(f"  [预览] 实验{exp_data['num']}: {exp_data['name']}"
+                      f"  (代码: {'有' if code else '无'}, 截图: {len(images)}张)")
+            return
+
         for idx, exp_data in enumerate(experiments):
             if idx >= num_slots:
                 print(f"  [跳过] 实验{exp_data['num']}: 没有足够的行")
                 continue
-            
+
             exp_num = exp_data["num"]
             exp_date = exp_dates.get(exp_num, "")
             row_offset = idx * ROWS_PER_EXP
-            
+
             src_path, out_path = detect_exp_dirs(BASE_DIR, exp_num)
             code = read_source_code(src_path, BASE_DIR)
             images = read_output_images(out_path)
-            
-            fill_single_experiment(table, exp_data, code, images, exp_date,
-                                   row_map=row_map, row_offset=row_offset)
-            print(f"  [完成] 实验{exp_num}")
-    
+
+            try:
+                fill_single_experiment(table, exp_data, code, images, exp_date,
+                                       row_map=row_map, row_offset=row_offset)
+                print(f"  [完成] 实验{exp_num}")
+            except Exception as e:
+                print(f"  ❌ 实验{exp_num} 填充失败: {e}")
+                logger.debug(f"  详细错误: ", exc_info=True)
+
     else:
         # 多表格格式：每个实验一个表格
         print(f"  检测到多表格格式，共 {len(report_tables)} 个表格")
-        
+
+        if dry_run:
+            for idx, exp_data in enumerate(experiments):
+                if idx >= len(report_tables):
+                    print(f"  [跳过] 实验{exp_data['num']}: 没有足够的表格")
+                    continue
+                src_path, out_path = detect_exp_dirs(BASE_DIR, exp_data["num"])
+                code = read_source_code(src_path, BASE_DIR)
+                images = read_output_images(out_path)
+                print(f"  [预览] 实验{exp_data['num']}: {exp_data['name']}"
+                      f"  (代码: {'有' if code else '无'}, 截图: {len(images)}张)")
+            return
+
         for idx, exp_data in enumerate(experiments):
             if idx >= len(report_tables):
                 print(f"  [跳过] 实验{exp_data['num']}: 没有足够的表格")
                 continue
-            
+
             exp_num = exp_data["num"]
             exp_date = exp_dates.get(exp_num, "")
             table = report_tables[idx]
             row_map = scan_table_rows(table)
-            
+
             src_path, out_path = detect_exp_dirs(BASE_DIR, exp_num)
             code = read_source_code(src_path, BASE_DIR)
             images = read_output_images(out_path)
-            
-            fill_single_experiment(table, exp_data, code, images, exp_date,
-                                   row_map=row_map)
-            print(f"  [完成] 实验{exp_num}")
+
+            try:
+                fill_single_experiment(table, exp_data, code, images, exp_date,
+                                       row_map=row_map)
+                print(f"  [完成] 实验{exp_num}")
+            except Exception as e:
+                print(f"  ❌ 实验{exp_num} 填充失败: {e}")
+                logger.debug(f"  详细错误: ", exc_info=True)
 
     # 保存
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(str(output_path))
-    print(f"  [完成] 合并报告: {output_path.name}")
-
-
-def fill_report_table_direct(table, exp_data: dict, code: str, images: list,
-                              output_text: str, exp_date: str = ""):
-    """直接填充一个表格对象（用于合并模式）"""
-    # Row 1: 上机时间
-    if exp_date:
-        cell = table.cell(1, 0)
-        for p in cell.paragraphs:
-            if "上机时间" in p.text:
-                for run in p.runs:
-                    run.text = ""
-                run = p.add_run(f"上机时间   {exp_date} ")
-                set_run_font(run, size=10.5)
-
-    # Row 2: 实验题目
-    cell = table.cell(2, 0)
-    # 检查是否已有用户填写的内容（除标题"实验题目"外是否有其他内容）
-    has_user_content = any("实验题目" not in p.text and p.text.strip() for p in cell.paragraphs)
-    if not has_user_content:
-        # 用户未填写，从指导书填充
-        for p in cell.paragraphs:
-            if "实验题目" not in p.text:
-                p._element.getparent().remove(p._element)
-        add_paragraph_to_cell(cell, exp_data["name"], {
-            "font_ea": "宋体", "font_latin": "宋体",
-            "size": 12, "bold": False,
-            "line_spacing": 1.5, "first_indent_chars": 0,
-        })
-
-    # Row 3: 实验目的和要求
-    cell = table.cell(3, 0)
-    # 检查是否已有用户填写的内容（除标题外是否有其他内容）
-    has_user_content = any("实验目的" not in p.text and p.text.strip() for p in cell.paragraphs)
-    if not has_user_content:
-        # 用户未填写，从指导书填充
-        clear_cell_keep_first_label(cell)
-        for i, item in enumerate(exp_data.get("purpose", []) + exp_data.get("content", []), 1):
-            add_paragraph_to_cell(cell, f"{i}．{item}", Fmt.CONTENT)
-
-    # Row 4: 实验过程
-    cell = table.cell(4, 0)
-    clear_cell_keep_first_label(cell)
-    if code:
-        add_paragraph_to_cell(cell, code, Fmt.CODE)
-    else:
-        add_paragraph_to_cell(cell, "（请将源代码放入 src/ 目录）", Fmt.CONTENT)
-
-    # Row 5: 实验结果
-    cell = table.cell(5, 0)
-    clear_cell_keep_first_label(cell)
-    if images:
-        for img_path in images:
-            add_image_to_cell(cell, img_path)
-    else:
-        add_paragraph_to_cell(cell, "（请将运行结果截图放入 output/ 目录）", Fmt.CONTENT)
-
-    # Row 6: 实验分析
-    cell = table.cell(6, 0)
-    clear_cell_keep_first_label(cell)
-    for title, content in _generate_analysis(exp_data, code):
-        add_paragraph_to_cell(cell, title, Fmt.SECTION)
-        add_paragraph_to_cell(cell, content, Fmt.CONTENT)
+    try:
+        doc.save(str(output_path))
+        print(f"  [完成] 合并报告: {output_path.name}")
+    except PermissionError:
+        print(f"  [错误] 无法保存文件（可能被其他程序占用）: {output_path}")
+    except Exception as e:
+        print(f"  [错误] 保存失败: {e}")
 
 
 # ============================================================
@@ -1148,7 +1202,7 @@ def print_directory_guide(experiments: list):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="算法分析与设计 - 实验报告自动生成工具"
+        description="程序设计类实验报告自动生成工具"
     )
     parser.add_argument(
         "--exp", type=int, default=None,
@@ -1160,7 +1214,15 @@ def main():
     )
     parser.add_argument(
         "--date", type=str, default="",
-        help="上机日期，格式: '2026  年 3  月 30 日'"
+        help="上机日期（支持多种格式: '2026年3月30日'、'2026-03-30'、'2026/03/30'）"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="预览模式，仅显示将要生成的内容，不实际生成报告"
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="显示详细的调试信息"
     )
     parser.add_argument(
         "--init", action="store_true",
@@ -1184,8 +1246,11 @@ def main():
     )
     args = parser.parse_args()
 
+    # 配置日志
+    setup_logging(verbose=args.verbose)
+
     print("=" * 60)
-    print("算法分析与设计 - 实验报告自动生成工具")
+    print("程序设计类实验报告 - 自动生成工具")
     print("=" * 60)
 
     # 检查运行环境
@@ -1197,7 +1262,7 @@ def main():
     # 检查必需文件（支持命令行指定路径）
     template_file = Path(args.template) if args.template else TEMPLATE_FILE
     instruction_file = Path(args.instruction) if args.instruction else INSTRUCTION_FILE
-    
+
     if template_file and not template_file.exists():
         # 尝试在BASE_DIR下查找
         alt = BASE_DIR / args.template if args.template else None
@@ -1262,27 +1327,46 @@ def main():
     else:
         target_exps = experiments
 
-    # 设置默认日期
-    exp_date = args.date
-    if not exp_date:
+    # 设置默认日期（支持多种输入格式）
+    if args.date:
+        exp_date = normalize_date(args.date)
+    else:
         now = datetime.now()
         exp_date = f"{now.year}  年 {now.month}  月 {now.day}  日"
 
-    print(f"\n[步骤2] 生成报告（共 {len(target_exps)} 个实验）...")
+    if args.dry_run:
+        print(f"\n[预览模式] 共 {len(target_exps)} 个实验（不实际生成文件）...")
+    else:
+        print(f"\n[步骤2] 生成报告（共 {len(target_exps)} 个实验）...")
 
     if args.merge:
         # 合并模式
-        output_path = output_dir / "算法分析与设计_实验报告_合并.docx"
-        exp_dates = {e["num"]: exp_date for e in target_exps}
-        merge_reports(target_exps, template_file, output_path, exp_dates)
+        if args.dry_run:
+            merge_reports(target_exps, template_file, None, dry_run=True)
+        else:
+            output_path = output_dir / "实验报告_合并.docx"
+            exp_dates = {e["num"]: exp_date for e in target_exps}
+            merge_reports(target_exps, template_file, output_path, exp_dates)
     else:
         # 单独生成模式
         for exp_data in target_exps:
             exp_num = exp_data["num"]
             cn_nums = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八"}
             cn = cn_nums.get(exp_num, str(exp_num))
-            output_path = output_dir / f"实验{cn}_报告.docx"
-            generate_single_report(exp_data, template_file, output_path, exp_date)
+
+            if args.dry_run:
+                src_path, out_path = detect_exp_dirs(BASE_DIR, exp_num)
+                code = read_source_code(src_path, BASE_DIR)
+                images = read_output_images(out_path)
+                print(f"  [预览] 实验{exp_num} ({exp_data['name']}): "
+                      f"代码: {'有' if code else '无'}, 截图: {len(images)}张")
+            else:
+                output_path = output_dir / f"实验{cn}_报告.docx"
+                try:
+                    generate_single_report(exp_data, template_file, output_path, exp_date)
+                except Exception as e:
+                    print(f"  ❌ 实验{exp_num} 生成失败: {e}")
+                    logger.debug(f"  详细错误: ", exc_info=True)
 
     print(f"\n[完成] 报告已保存到: {output_dir}")
     print("=" * 60)

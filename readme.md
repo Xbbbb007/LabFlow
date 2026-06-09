@@ -269,6 +269,7 @@ Permission denied
 ├── 实验报告.docx            # 报告模板（用户自行上传）
 ├── 实验指导书.docx          # 实验指导书（用户自行上传）
 ├── generate_report.py      # 自动生成脚本
+├── capture_output.py       # 终端截图生成工具
 ├── check_environment.py    # 环境检测脚本
 ├── readme.md
 └── AGENTS.md
@@ -326,8 +327,12 @@ python generate_report.py --exp 1
 # 合并所有实验到一份报告
 python generate_report.py --merge
 
-# 指定上机日期
+# 指定上机日期（支持多种格式）
 python generate_report.py --merge --date "2026年6月8日"
+python generate_report.py --merge --date "2026-06-08"
+
+# 预览模式（不实际生成文件，仅显示将要生成的内容）
+python generate_report.py --dry-run --merge --date "2026年6月8日"
 
 # 使用其他模板和指导书
 python generate_report.py --template "path/to/模板.docx" --instruction "path/to/指导书.docx" --merge --date "2026年6月8日" --output-dir "output_folder"
@@ -345,7 +350,9 @@ python generate_report.py --guide
 | `--output-dir`  | 输出目录               | `report/`      |
 | `--merge`       | 合并所有实验到一份报告 | 否（单独生成） |
 | `--exp N`       | 仅生成第N个实验        | 全部           |
-| `--date`        | 上机日期               | 当天日期       |
+| `--date`        | 上机日期（支持多种格式） | 当天日期     |
+| `--dry-run`     | 预览模式，不生成文件   | 否             |
+| `--verbose, -v` | 显示详细调试信息       | 否             |
 
 ### 模板格式自动检测
 
@@ -373,6 +380,32 @@ python generate_report.py --guide
 
 ## 截图要求
 
-- 格式：PNG（优先）或 JPG
+- 格式：PNG（优先）、JPG、BMP、GIF、WebP
 - 背景：黑色终端背景
 - 图片会自动缩放到页面宽度（15cm），高度超限（20cm）时自动等比缩小
+
+### 终端截图生成工具
+
+项目内置了 `capture_output.py` 截图工具，可以将命令输出渲染为黑底白字的终端风格截图：
+
+```bash
+# 运行命令并截图
+python capture_output.py --cmd "java -cp src/exp1 Main" --output output/exp1/run_result.png
+
+# 从文本文件生成截图
+python capture_output.py --file output/exp1/output.txt --output output/exp1/run_result.png
+
+# 直接传入文本生成截图
+python capture_output.py --text "Hello World" --output output/exp1/run_result.png
+```
+
+| 参数           | 说明                     |
+| -------------- | ------------------------ |
+| `--cmd`        | 要执行的命令             |
+| `--file`       | 读取文本的文件路径       |
+| `--text`       | 直接传入的文本内容       |
+| `--output, -o` | 截图输出路径（必填）     |
+| `--cwd`        | 命令执行的工作目录       |
+| `--timeout`    | 命令执行超时（默认30秒） |
+| `--font-size`  | 字体大小（默认16）       |
+| `--max-width`  | 截图最大宽度（默认900）  |

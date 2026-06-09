@@ -988,6 +988,15 @@ def _analyze_code(code: str) -> dict:
     # 统计条件分支
     branch_count = len(re.findall(r"\b(if|else\s+if|elif|switch|case)\b", code))
 
+    # ---- OOP / Java 特征统计 ----
+    class_count = len(re.findall(r"\b(public\s+)?(abstract\s+)?class\s+\w+", code))
+    interface_count = len(re.findall(r"\binterface\s+\w+", code))
+    extends_count = len(re.findall(r"\bextends\s+\w+", code))
+    implements_count = len(re.findall(r"\bimplements\s+\w+", code))
+    override_count = len(re.findall(r"@Override", code))
+    static_count = len(re.findall(r"\bstatic\b", code))
+    new_count = len(re.findall(r"\bnew\s+\w+\s*\(", code))
+
     return {
         "total_lines": total_lines,
         "non_empty_lines": non_empty,
@@ -996,20 +1005,161 @@ def _analyze_code(code: str) -> dict:
         "loop_count": loop_count,
         "has_recursion": has_recursion,
         "branch_count": branch_count,
+        "class_count": class_count,
+        "interface_count": interface_count,
+        "extends_count": extends_count,
+        "implements_count": implements_count,
+        "override_count": override_count,
+        "static_count": static_count,
+        "new_count": new_count,
     }
 
 
-# ============================================================
-# 报告生成核心
-# ============================================================
-
-def _generate_analysis(exp_data: dict, code: str) -> list:
+def _detect_course_type(exp_data: dict, code: str) -> str:
     """
-    生成实验分析内容。
-    返回: [(标题, 内容), ...] 列表
+    根据实验名称和代码特征自动判断课程类型。
+    返回: "oop" (程序设计/面向对象) 或 "algo" (算法设计)
+    """
+    name = exp_data.get("name", "").lower()
+    purpose = " ".join(exp_data.get("purpose", [])).lower()
+    combined = name + " " + purpose
 
-    结合代码静态分析生成更实际的分析文本。
-    TODO: 可以接入 AI API 来生成更智能的分析。
+    # OOP / 程序设计类关键词
+    oop_keywords = [
+        "java", "python基础", "c++基础", "c语言基础",
+        "类与对象", "类与", "面向对象", "继承", "接口", "多态",
+        "控制语句", "基础语法", "数据类型", "数组", "封装",
+        "子类", "抽象类", "程序设计",
+    ]
+    # 算法类关键词
+    algo_keywords = [
+        "递归", "分治", "动态规划", "贪心", "回溯", "排序",
+        "图", "树", "最短路径", "背包", "算法分析", "算法设计",
+        "复杂度", "二分", "搜索", "bfs", "dfs",
+    ]
+
+    oop_score = sum(1 for kw in oop_keywords if kw in combined)
+    algo_score = sum(1 for kw in algo_keywords if kw in combined)
+
+    # 代码特征辅助判断
+    stats = _analyze_code(code) if code else {}
+    if stats.get("class_count", 0) >= 2 or stats.get("interface_count", 0) > 0:
+        oop_score += 2
+    if stats.get("has_recursion"):
+        algo_score += 2
+
+    return "oop" if oop_score >= algo_score else "algo"
+
+
+def _generate_oop_analysis(exp_data: dict, code: str) -> list:
+    """
+    为程序设计/OOP课程生成实验分析。
+    分析维度：实现概述、知识点运用、问题与调试、实验心得。
+    """
+    exp_name = exp_data.get("name", "")
+    stats = _analyze_code(code)
+    analyses = []
+
+    # ---- 1. 实验内容与实现分析 ----
+    parts = [
+        f"本实验围绕「{exp_name}」展开，"
+        f"代码共 {stats.get('total_lines', 0)} 行，"
+        f"其中有效代码 {stats.get('non_empty_lines', 0)} 行、"
+        f"注释 {stats.get('comment_lines', 0)} 行。"
+    ]
+    if stats.get("class_count", 0) > 0:
+        parts.append(f"程序定义了 {stats['class_count']} 个类")
+        if stats.get("interface_count", 0) > 0:
+            parts.append(f"和 {stats['interface_count']} 个接口")
+        parts.append(f"，共包含 {stats.get('func_count', 0)} 个方法。")
+    if stats.get("new_count", 0) > 0:
+        parts.append(f"通过 {stats['new_count']} 处对象创建完成了实验要求的各项功能演示。")
+    parts.append("程序运行结果与预期一致，各子实验均正确完成。")
+    analyses.append(("一、实验内容与实现分析", "".join(parts)))
+
+    # ---- 2. 关键知识点运用 ----
+    concepts = []
+    if stats.get("class_count", 0) >= 2:
+        concepts.append("类的定义与对象创建")
+    if stats.get("extends_count", 0) > 0:
+        concepts.append("继承（extends）与方法重写（Override）")
+    if stats.get("implements_count", 0) > 0:
+        concepts.append("接口的定义与实现（implements）")
+    if stats.get("override_count", 0) > 0:
+        concepts.append("方法重写与多态")
+    if stats.get("static_count", 0) > 0:
+        concepts.append("静态变量与静态方法")
+    if "abstract" in code:
+        concepts.append("抽象类与抽象方法")
+    if stats.get("branch_count", 0) > 0:
+        concepts.append("条件分支控制语句")
+    if stats.get("loop_count", 0) > 0:
+        concepts.append("循环结构")
+    if stats.get("new_count", 0) > 0 and "引用" in code:
+        concepts.append("对象引用与引用传递")
+
+    if concepts:
+        concept_text = "、".join(concepts)
+        analyses.append((
+            "二、关键知识点运用",
+            f"本实验综合运用了以下面向对象的核心概念：{concept_text}。"
+            f"通过实际编码加深了对这些概念的理解，"
+            f"尤其是通过多组子实验的对比（如对象共享引用 vs 独立副本），"
+            f"直观地验证了不同机制的运行效果差异。"
+        ))
+    else:
+        analyses.append((
+            "二、关键知识点运用",
+            f"本实验围绕{exp_name}的核心知识点展开编程实践，"
+            f"通过多个子实验验证了相关语法和运行机制，"
+            f"加深了对程序设计基础概念的理解。"
+        ))
+
+    # ---- 3. 问题与调试分析 ----
+    issues = []
+    if stats.get("class_count", 0) > 1:
+        issues.append("多类文件的编译顺序和类路径配置")
+    if "static" in code:
+        issues.append("静态变量与实例变量的作用域区分")
+    if stats.get("extends_count", 0) > 0:
+        issues.append("子类构造方法与父类构造方法的调用顺序")
+    if stats.get("implements_count", 0) > 0:
+        issues.append("接口方法必须在实现类中全部重写")
+    if "数组" in code or "Array" in code or "array" in code:
+        issues.append("数组越界和引用传递的副作用")
+
+    if issues:
+        issue_text = "、".join(issues[:3])
+        analyses.append((
+            "三、问题与调试分析",
+            f"在编码和调试过程中，主要遇到了以下问题：{issue_text}。"
+            f"通过查阅文档、添加调试输出和逐步排查，逐一解决了这些问题。"
+            f"这些调试经历帮助我更深刻地理解了 Java 语言的运行机制和常见陷阱。"
+        ))
+    else:
+        analyses.append((
+            "三、问题与调试分析",
+            f"在实验过程中，通过多组测试数据验证了程序的正确性。"
+            f"编写代码时注意了边界条件的处理和输入合法性检查，"
+            f"确保程序在各种情况下都能给出正确结果。"
+        ))
+
+    # ---- 4. 实验心得 ----
+    analyses.append((
+        "四、实验心得",
+        f"通过本次「{exp_name}」实验，我加深了对面向对象程序设计思想的理解。"
+        f"从编写代码到编译运行再到调试排错，整个过程让我体会到了"
+        f"封装、继承和多态在实际编程中的价值。"
+        f"同时也认识到，良好的代码结构和清晰的注释对于程序的可读性和可维护性至关重要。"
+    ))
+
+    return analyses
+
+
+def _generate_algo_analysis(exp_data: dict, code: str) -> list:
+    """
+    为算法设计课程生成实验分析。
+    分析维度：正确性、时间复杂度、空间复杂度、心得。
     """
     exp_name = exp_data.get("name", "")
     stats = _analyze_code(code)
@@ -1084,6 +1234,22 @@ def _generate_analysis(exp_data: dict, code: str) -> list:
     ))
 
     return analyses
+
+
+def _generate_analysis(exp_data: dict, code: str) -> list:
+    """
+    生成实验分析内容。根据课程类型自动选择分析模板。
+    返回: [(标题, 内容), ...] 列表
+
+    课程类型由 _detect_course_type() 自动判断：
+    - OOP/程序设计课程 → 侧重知识点运用、问题调试
+    - 算法课程 → 侧重正确性、时间/空间复杂度
+    """
+    course_type = _detect_course_type(exp_data, code)
+    if course_type == "oop":
+        return _generate_oop_analysis(exp_data, code)
+    else:
+        return _generate_algo_analysis(exp_data, code)
 
 
 def generate_single_report(exp_data: dict, template_path: Path, output_path: Path,

@@ -330,7 +330,8 @@ def detect_report_tables(doc) -> tuple:
 
 def fill_single_experiment(table_or_range, exp_data: dict, code: str,
                            images: list, exp_date: str = "",
-                           row_map: dict = None, row_offset: int = 0):
+                           row_map: dict = None, row_offset: int = 0,
+                           analysis_text: str = ""):
     """
     通用的实验填充函数（唯一入口）。
     通过 row_map 自动定位每个字段所在行，而不是硬编码行号。
@@ -344,6 +345,7 @@ def fill_single_experiment(table_or_range, exp_data: dict, code: str,
         exp_date: 上机日期
         row_map: {行类型: 行索引} 映射（由 scan_table_rows 生成）
         row_offset: 行偏移（用于单表格多实验场景）
+        analysis_text: Agent 生成的实验分析文本（优先使用，为空则回退模板）
     """
     table = table_or_range
 
@@ -432,9 +434,20 @@ def fill_single_experiment(table_or_range, exp_data: dict, code: str,
         row_idx = row_map["analysis"] + row_offset
         cell = table.cell(row_idx, 0)
         clear_cell_keep_first_label(cell)
-        for title, content in _generate_analysis(exp_data, code):
-            add_paragraph_to_cell(cell, title, Fmt.SECTION)
-            add_paragraph_to_cell(cell, content, Fmt.CONTENT)
+
+        # 优先使用 Agent 写的分析，没有则回退到模板生成
+        parsed = _parse_analysis_text(analysis_text) if analysis_text else []
+
+        if parsed:
+            for title, body in parsed:
+                if title:
+                    add_paragraph_to_cell(cell, title, Fmt.SECTION)
+                if body:
+                    add_paragraph_to_cell(cell, body, Fmt.CONTENT)
+        else:
+            for title, content in _generate_analysis(exp_data, code):
+                add_paragraph_to_cell(cell, title, Fmt.SECTION)
+                add_paragraph_to_cell(cell, content, Fmt.CONTENT)
 
 
 # ============================================================
@@ -867,6 +880,73 @@ def read_output_text(out_path: Path) -> str:
     return ""
 
 
+def read_analysis_text(out_path: Path) -> str:
+    """
+    读取 AI Agent 生成的实验分析文本。
+    如果 output/exp{N}/analysis.txt 存在则读取，否则返回空字符串。
+
+    文件格式约定（每个章节用空行分隔，第一行为标题）：
+
+        一、算法正确性分析
+        分析内容...
+
+        二、时间复杂度分析
+        分析内容...
+    """
+    if out_path is None or not out_path.exists():
+        return ""
+
+    for name in ["analysis.txt", "分析.txt"]:
+        txt_file = out_path / name
+        if txt_file.exists():
+            try:
+                return txt_file.read_text(encoding="utf-8").strip()
+            except UnicodeDecodeError:
+                return txt_file.read_text(encoding="gbk", errors="replace").strip()
+    return ""
+
+
+def _parse_analysis_text(analysis_text: str) -> list:
+    """
+    解析 analysis.txt 的内容为 [(标题, 正文), ...] 列表。
+
+    解析规则：
+    - 以"一、"、"二、"等中文序号开头的行视为章节标题
+    - 标题后到下一个标题前的内容为该章节正文
+    - 如果没有任何章节标题，整段作为纯文本返回
+    """
+    if not analysis_text:
+        return []
+
+    section_pattern = re.compile(r"^[一二三四五六七八九十]+[、．.](.+)$")
+    sections = []
+    current_title = None
+    current_body = []
+
+    for line in analysis_text.splitlines():
+        m = section_pattern.match(line.strip())
+        if m:
+            # 保存上一个章节
+            if current_title is not None:
+                sections.append((current_title, "\n".join(current_body).strip()))
+            current_title = line.strip()
+            current_body = []
+        else:
+            if current_title is not None:
+                current_body.append(line)
+            elif line.strip():
+                # 还没遇到任何标题，把非空行当作一个无标题章节
+                if current_title is None and not sections:
+                    current_title = ""
+                    current_body.append(line)
+
+    # 保存最后一个章节
+    if current_title is not None:
+        sections.append((current_title, "\n".join(current_body).strip()))
+
+    return sections
+
+
 # ============================================================
 # 代码静态分析（用于生成更有意义的实验分析）
 # ============================================================
@@ -1028,6 +1108,11 @@ def generate_single_report(exp_data: dict, template_path: Path, output_path: Pat
     if not images:
         print(f"  [提示] 实验{exp_num} 未找到运行结果截图")
 
+    # 读取 Agent 生成的实验分析（如有）
+    analysis_text = read_analysis_text(out_path)
+    if analysis_text:
+        print(f"  [信息] 实验{exp_num} 使用 Agent 生成的实验分析")
+
     # 打开模板，使用动态表格检测（与合并模式一致）
     doc = Document(str(template_path))
     report_tables, is_single = detect_report_tables(doc)
@@ -1042,7 +1127,8 @@ def generate_single_report(exp_data: dict, template_path: Path, output_path: Pat
 
     logger.debug(f"  行类型映射: {row_map}")
 
-    fill_single_experiment(table, exp_data, code, images, exp_date, row_map=row_map)
+    fill_single_experiment(table, exp_data, code, images, exp_date,
+                           row_map=row_map, analysis_text=analysis_text)
 
     # 保存
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1108,10 +1194,12 @@ def merge_reports(experiments: list, template_path: Path, output_path: Path,
             src_path, out_path = detect_exp_dirs(BASE_DIR, exp_num)
             code = read_source_code(src_path, BASE_DIR)
             images = read_output_images(out_path)
+            analysis_text = read_analysis_text(out_path)
 
             try:
                 fill_single_experiment(table, exp_data, code, images, exp_date,
-                                       row_map=row_map, row_offset=row_offset)
+                                       row_map=row_map, row_offset=row_offset,
+                                       analysis_text=analysis_text)
                 print(f"  [完成] 实验{exp_num}")
             except Exception as e:
                 print(f"  ❌ 实验{exp_num} 填充失败: {e}")
@@ -1146,10 +1234,12 @@ def merge_reports(experiments: list, template_path: Path, output_path: Path,
             src_path, out_path = detect_exp_dirs(BASE_DIR, exp_num)
             code = read_source_code(src_path, BASE_DIR)
             images = read_output_images(out_path)
+            analysis_text = read_analysis_text(out_path)
 
             try:
                 fill_single_experiment(table, exp_data, code, images, exp_date,
-                                       row_map=row_map)
+                                       row_map=row_map,
+                                       analysis_text=analysis_text)
                 print(f"  [完成] 实验{exp_num}")
             except Exception as e:
                 print(f"  ❌ 实验{exp_num} 填充失败: {e}")
